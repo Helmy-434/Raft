@@ -19,6 +19,7 @@ package raft
 
 import (
 	"sync"
+	"time"
 
 	"lab2raft/labrpc"
 )
@@ -47,7 +48,21 @@ type Raft struct {
 	// Your data here (3A, 3B).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	applyCh chan ApplyMsg
+	dead    int32 // for Kill()
 
+	state       State
+	currentTerm int
+	votedFor    int        // -1 = none
+	log         []LogEntry // log[0] is a dummy entry, so real indexes start at 1
+
+	commitIndex int
+	lastApplied int
+	nextIndex   []int // leader only
+	matchIndex  []int // leader only
+
+	lastHeard time.Time  // election timer
+	applyCond *sync.Cond // wakes the apply goroutine
 }
 
 // return currentTerm and whether this server

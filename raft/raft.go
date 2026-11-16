@@ -39,6 +39,16 @@ type LogEntry struct {
 	Term    int
 }
 
+// TO BE REPLACED BY HELMY
+type State int
+
+const (
+	Follower State = iota
+	Candidate
+	Leader
+)
+// TO BE REPLACED BY HELMY
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu    sync.Mutex          // Lock to protect shared access to this peer's state
@@ -112,6 +122,81 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Success = false 
+	reply.ConflictTerm = -1
+	reply.ConflictIndex = 0
+
+	if args.Term < rf.currentTerm { // old leader sending stuff
+		reply.Term = rf.currentTerm
+		DPrintf("[Peer %d] Reject AppendEntries from %d, reason: args.Term %d < peers curr term %d",rf.me,args.LeaderId,args.Term,rf.currentTerm)
+		return
+	}
+
+	if args.Term > rf.currentTerm{ // higher term so become a follower
+		rf.becomeFollower(args.Term)
+		DPrintf("[Peer %d] Found a higher term %d from %d, becoming Follower",rf.me,args.Term,args.LeaderId)
+	} else if rf.state != Follower { // if it was a candidate and lost 
+		rf.state = Follower 
+		DPrintf("[Peer %d] Received AppendEntries in same term %d from %d while %v, becoming Follower", rf.me, args.Term, args.LeaderId, rf.state)
+	}
+	rf.resetElectionTimer()
+	reply.Term = rf.currentTerm
+	// DPrintf("[Peer %d] Resetting Election Timer",rf.me)
+
+	// identifying where are the conflicts if they exist
+	if args.PrevLogIndex >= len(rf.log){ // follower was offline and missed some entries
+		reply.ConflictTerm = -1
+		reply.ConflictIndex = len(rf.log)
+		DPrintf("[Peer %d] Reject AppendEntries from %d, reason: log too short (len=%d, prevLogIndex=%d)",rf.me, args.LeaderId, len(rf.log), args.PrevLogIndex)
+		return
+	}
+
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm{ // conflicting terms
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+
+		i := args.PrevLogIndex
+		for i > 1 && rf.log[i-1].Term == reply.ConflictTerm{
+			i--
+		}
+		reply.ConflictIndex = i
+		DPrintf("[Peer %d] Reject AppendEntries from %d, reason: term mismatch at %d (got %d, want %d), conflictIndex=%d",rf.me, args.LeaderId, args.PrevLogIndex, reply.ConflictTerm, args.PrevLogTerm, reply.ConflictIndex)
+		return
+	}
+
+	// conflict resolution
+	for i, entry := range args.Entries {
+        logIdx := args.PrevLogIndex + i + 1
+        if logIdx < len(rf.log) {
+            if rf.log[logIdx].Term != entry.Term {
+                DPrintf("[Peer %d] Conflict at index %d (local term %d != leader term %d), truncating log and appending %d entries",rf.me, logIdx, rf.log[logIdx].Term, entry.Term, len(args.Entries[i:]))
+                rf.log = rf.log[:logIdx]
+                rf.log = append(rf.log, args.Entries[i:]...)
+                break
+            }
+        } else {
+            DPrintf("[Peer %d] Appending %d new entries starting at index %d", rf.me, len(args.Entries[i:]), logIdx)
+            rf.log = append(rf.log, args.Entries[i:]...)
+            break
+        }
+    }
+	
+	// advance commit idx and wakes applyLoop()
+	if args.LeaderCommit > rf.commitIndex {
+		lastNewIndex := args.PrevLogIndex + len(args.Entries)
+		newCommit := args.LeaderCommit
+		if lastNewIndex < newCommit {
+			newCommit = lastNewIndex
+		}
+		if newCommit > rf.commitIndex {
+			rf.commitIndex = newCommit
+			DPrintf("[Peer %d] Updated commitIndex to %d", rf.me, rf.commitIndex)
+			rf.applyCond.Broadcast()
+		}
+	}
+	reply.Success = true
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -209,6 +294,38 @@ func (rf *Raft) Kill() {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
+
+func (rf *Raft) applyLoop(){
+	for !rf.killed(){
+		rf.mu.Lock()
+		for rf.lastApplied >= rf.commitIndex && !rf.killed() {
+			rf.applyCond.Wait()
+		}
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+
+		start := rf.lastApplied + 1
+		end := rf.commitIndex
+		msgs := make([]ApplyMsg, 0, end-start+1)
+		for i := start; i <= end; i++ {
+			msgs = append(msgs, ApplyMsg{Index:i,Command: rf.log[i].Command})
+		}
+		rf.lastApplied = end
+		DPrintf("[Peer %d] Batching entries %d..%d for applyCh", rf.me, start, end)
+		rf.mu.Unlock()
+
+		for _, msg := range msgs {
+			if rf.killed() {
+				return
+			}
+			DPrintf("[Peer %d] Applying index=%d command=%v", rf.me, msg.Index, msg.Command)
+			rf.applyCh <- msg
+		}
+	}
+}
+
 func Make(peers []*labrpc.ClientEnd, me int, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers

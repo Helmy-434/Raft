@@ -40,7 +40,6 @@ type LogEntry struct {
 	Term    int
 }
 
-// TO BE REPLACED BY HELMY
 type State int
 
 const (
@@ -48,8 +47,6 @@ const (
 	Candidate
 	Leader
 )
-
-// TO BE REPLACED BY HELMY
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -81,8 +78,6 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	// Your code here (3A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.state == Leader
@@ -138,6 +133,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("[Peer %d] Voted for %d in term %d", rf.me, args.CandidateId, rf.currentTerm)
 	}
 }
+
+//caller must hold the mutex lock
 
 func (rf *Raft) lastLogIndex() int { return len(rf.log) - 1 }
 func (rf *Raft) lastLogTerm() int  { return rf.log[len(rf.log)-1].Term }
